@@ -6,11 +6,14 @@ import itertools
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import lru_cache
 from inspect import isclass
+import types
 from typing import (
     Any,
     Generic,
+    Generator,
     Literal,
     TypeVar,
+    get_args,
 )
 
 import numpy as np
@@ -39,6 +42,7 @@ __all__ = [
 StrictConfig: ConfigDict = {"extra": "forbid"}
 
 C = TypeVar("C")
+S = TypeVar("S")
 T = TypeVar("T")
 
 GapArray = npt.NDArray[np.bool_]
@@ -123,6 +127,7 @@ def discriminated_union_of_subclasses(
     _tagged_unions[super_cls] = tagged_union
 
     def add_subclass_to_union(subclass: type[C]):
+        super(super_cls, subclass).__init_subclass__()
         # Add a discriminator field to a subclass so it can
         # be identified when deserializing
         subclass.__annotations__ = {
@@ -132,7 +137,7 @@ def discriminated_union_of_subclasses(
         setattr(subclass, discriminator, Field(subclass.__name__, repr=False))  # type: ignore
 
     def get_schema_of_union(
-        cls: type[C], source_type: Any, handler: GetCoreSchemaHandler
+        cls: type[C], source_type: type[C], handler: GetCoreSchemaHandler
     ):
         if cls is not super_cls:
             tagged_union.add_member(cls)
@@ -140,7 +145,7 @@ def discriminated_union_of_subclasses(
         # Rebuild any dataclass (including this one) that references this union
         # Note that this has to be done after the creation of the dataclass so that
         # previously created classes can refer to this newly created class
-        return tagged_union.schema(handler)
+        return tagged_union.schema(source_type, handler)
 
     super_cls.__init_subclass__ = classmethod(add_subclass_to_union)  # type: ignore
     super_cls.__get_pydantic_core_schema__ = classmethod(get_schema_of_union)  # type: ignore
@@ -149,19 +154,70 @@ def discriminated_union_of_subclasses(
 
 _tagged_unions: dict[type, _TaggedUnion] = {}
 
+def _get_origin(typ: type[Any]) -> type[Any]:
+    origin = getattr(typ, '__origin__', None)
+    if not origin:
+        return typ
+    # go around again, mainly to deal with Annotated not returning the origin of the wrapped type
+    return _get_origin(origin)
+
+# def _recursive_bases(typ: type[Any]) -> Generator[type[Any]]:
+#     print(f'    recursing {typ}')
+#     for base in getattr(typ, '__orig_bases__', _get_origin(typ).__bases__):
+#         yield base
+#         yield from _recursive_bases(base)
+
+def _subclass_spec(base: type[Any], sub: type[Any]) -> list[int | type] | None:
+    print(f'{base=}, {sub=}')
+    base = _get_origin(base) # strip any annotations or aliases
+    if not getattr(base, '__parameters__', None): # base class is not generic
+        return []
+    for bs in types.get_original_bases(sub):
+        if issubclass(_get_origin(bs), base):
+            pass
+        if _get_origin(bs) == base:
+            break
+        else:
+            spec =
+    else:
+        raise ValueError("sub is not subclass of base")
+    args = getattr(sub, '__parameters__', ())
+    base_args = get_args(bs)
+    if not args: # subclass is not generic
+        return list(base_args)
+    return [b if isinstance(b, type) else args.index(b) for b in base_args]
+
+def _build_subclass(sub: type[Any], spec: list[int | type], actual: type[Any]) -> type[Any] | None:
+    paras = list(getattr(sub, '__parameters__', ()))
+    base = get_args(actual)
+    for i, s in enumerate(spec):
+        if isinstance(s, int):
+            paras[s] = base[i]
+        else:
+            if not issubclass(base[i], s):
+                return None
+    if paras:
+        return sub.__class_getitem__(tuple(paras))
+    else:
+        return sub
 
 class _TaggedUnion:
     def __init__(self, base_class: type[Any], discriminator: str):
         self._base_class = base_class
+        # If this class is generic, keep track of the parameters used
+        self._parameters = getattr(base_class, '__parameters__', [])
         # Classes and their field names that refer to this tagged union
         self._discriminator = discriminator
         # The members of the tagged union, i.e. subclasses of the baseclass
         self._subclasses: list[type] = []
+        # Mapping of generic parameters of each subclass
+        self._subclass_spec: dict[type, list[int|type]] = {}
 
     def add_member(self, cls: type):
         if cls in self._subclasses:
             return
         self._subclasses.append(cls)
+        # self._subclass_spec[cls] = _subclass_spec(self._base_class, cls)
         for member in self._subclasses:
             if member is not cls:
                 _TaggedUnion._rebuild(member)
@@ -174,17 +230,54 @@ class _TaggedUnion:
             if issubclass(cls_or_func, BaseModel):
                 cls_or_func.model_rebuild(force=True)
 
-    def schema(self, handler: GetCoreSchemaHandler) -> CoreSchema:
+    def schema(self, actual_type: type[C], handler: GetCoreSchemaHandler) -> CoreSchema:
         return tagged_union_schema(
-            _make_schema(tuple(self._subclasses), handler),
+               _make_schema(self._subclasses, handler),
+                # _make_schema((subschema for sub in self._subclasses if (subschema := _build_subclass(sub, self._subclass_spec[sub], actual_type))), handler),
             discriminator=self._discriminator,
             ref=self._base_class.__name__,
         )
 
+    def _union_member(self, actual_type: type[C], sub_class: type[S]) -> type[S] | None:
+        # Multiple sitations we could be in
+        # Base class is not generic:
+        # -> child class is not generic
+        #    -> no generics involved so return as is
+        # -> child class is generic
+        #    -> generics are all childs, return Any for all TODO: defaults/bounds?
+        # Base class is generic
+        # -> child is not generic
+        #    -> child subclass of specific type
+        #       return only if types match actual type
+        # -> child is generic
+        #    -> base generics filled, eg Child(Base[int], Generic[T]):
+        #       return Any (defaults/bounds) if specific type match actual type
+        #    -> base generics passed only, eg Child(Base[T])
+        #       return Child with types from actual type
+        #    -> base generics and new generics, eg Child(Base[T], Generic[T, U]):
+        #       replace generics with args from actual type and fill in Any for rest
+        #
+        # If base class is generic but actual type has no args, treat as Any?
+        parent_paras = getattr(actual_type, '__parameters__', [])
+        sub_paras = getattr(sub_class, '__parameters__', [])
+        sub_parent = sub_class.__orig_bases__
+        for i, base in enumerate(sub_class.__orig_bases__):
+            if base.__origin__ == self._base_class:
+                break
+        else:
+            return sub_class
+            raise ValueError("Base class is not base of subclass")
+        print(f'{actual_type.__args__=}')
+        print(f'{sub_class.__parameters__=}')
+        print(f'{sub_class=}')
+        print(f'{base=}')
+        print()
+        return sub_class
 
-@lru_cache(1)
+
+# @lru_cache(1)
 def _make_schema(
-    members: tuple[type[Any], ...], handler: Callable[[Any], CoreSchema]
+    members: Iterable[type[Any]], handler: Callable[[Any], CoreSchema]
 ) -> dict[str, CoreSchema]:
     return {member.__name__: handler(member) for member in members}
 
