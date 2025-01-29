@@ -6,13 +6,13 @@ import itertools
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from inspect import isclass
 import warnings
-from types import UnionType, get_original_bases
+from types import GenericAlias, UnionType, get_original_bases
 import typing
 from typing import (
     Any,
     Generic,
     Literal,
-    TypeAlias,
+    NewType,
     TypeVar,
     get_args,
 )
@@ -172,7 +172,7 @@ class InconsistentTypeWarning(RuntimeWarning):
     pass
 
 
-SpecEntry = int | type | TypeAlias | UnionType
+SpecEntry = int | type | UnionType | GenericAlias | NewType
 
 
 def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
@@ -187,6 +187,13 @@ def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
         if spec is None:
             continue
         b_args = typing.get_args(base) or []
+        required_args = len([i for i in spec if isinstance(i, int)])
+        if len(b_args) < required_args:
+            warnings.warn(
+                f"Type {sub} does not have enough type parameters, expected {required_args}, found {len(b_args)}",
+                InconsistentTypeWarning,
+            )
+            return None
         for i, p in enumerate(spec):
             if isinstance(p, type):
                 current = sub_spec[i]
@@ -198,18 +205,20 @@ def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
                 sub_spec[i] = p
             elif isinstance(p, int):
                 req = b_args[p]
-                if isinstance(req, type):
-                    sub_spec[i] = req
-                elif isinstance(req, UnionType):
-                    warnings.warn("what are unions?")
-                    sub_spec[i] = req
-                else:
+                if isinstance(req, TypeVar):
                     sub_spec[i] = paras.index(req)
-    return sub_spec
+                else:
+                    sub_spec[i] = req
+
+    if None in sub_spec:
+        # pretty sure this isn't possible
+        warnings.warn("Unspecified typevars in hierarchy", InconsistentTypeWarning)
+        return None
+    return sub_spec  # type:ignore Does not contain None from manual check above
 
 
 def _build_subclass(
-    sub: type[Any], spec: list[int | type], actual: type[Any]
+    sub: type[Any], spec: list[SpecEntry], actual: type[Any]
 ) -> type[Any] | None:
     paras = list(_get_parameters(sub))
     base = get_args(actual)
@@ -218,8 +227,20 @@ def _build_subclass(
             if base[i] != Any:
                 paras[s] = base[i]
         else:
-            if base[i] != Any and not issubclass(base[i], s):
-                return None
+            # s is a bound on the allowed values base[i] can be.
+            # if there are no types that can be both, this subclass is not an option so return None
+
+            # if intersection(base[i], s).is_empty():
+            #     return None
+            if isinstance(s, UnionType):
+                # TODO: this should check the intersection of types in base[i] and s
+                pass
+            elif isinstance(s, type):
+                if base[i] != Any and not issubclass(base[i], s):
+                    return None
+            else:
+                # compare allowed types in alias and in base[i]
+                pass
     if paras:
         return sub.__class_getitem__(tuple(paras))
     else:
