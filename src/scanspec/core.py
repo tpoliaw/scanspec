@@ -164,10 +164,6 @@ def _get_origin(typ: type[Any]) -> type[Any]:
     return _get_origin(origin)
 
 
-def _get_bases(typ: type) -> list[type]:
-    return getattr(typ, "__orig_bases__", ())
-
-
 def _get_parameters(typ: type) -> tuple[type, ...]:
     return getattr(typ, "__parameters__", None) or ()
 
