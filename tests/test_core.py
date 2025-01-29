@@ -1,4 +1,4 @@
-from scanspec.core import discriminated_union_of_subclasses, _get_origin, _subclass_spec, _build_subclass
+from scanspec.core import discriminated_union_of_subclasses, _subclass_spec, _build_subclass, _get_origin
 from pydantic import TypeAdapter
 import pytest
 from pydantic.dataclasses import dataclass
@@ -45,6 +45,24 @@ class DisorderedGeneric(Parent[U], Generic[T, U, V]):
     g: T
     h: U
     i: V
+
+A = TypeVar('A', int, float, str)
+B = TypeVar('B', int, float)
+
+@discriminated_union_of_subclasses
+class ConstrainedParent(Generic[A]): pass
+
+@dataclass
+class ConstrainedChild(ConstrainedParent[B]):
+    cc: B
+
+@discriminated_union_of_subclasses
+class NonGenericParent: pass
+
+@dataclass
+class NonGenericChild(NonGenericParent):
+    a: int
+    b: float
 
 def test_child():
     ch = TypeAdapter(Parent[int]).validate_python({'type': 'Child', 'a': '42'})
@@ -99,7 +117,6 @@ def test_get_origin(typ: type[Any], origin: type[Any]):
     (Parent, DisorderedGeneric, [1])
     ])
 def test_subclass_spec(base: type[Any], origin: type[Any], spec: list[int|type[Any]]):
-    print()
     assert _subclass_spec(base, origin) == spec
 
 @pytest.mark.parametrize('base,actual,exp', [
@@ -117,3 +134,13 @@ def test_build_subclass(base: type[Any], actual: type[Any], exp: type[Any]):
     spec = _subclass_spec(_get_origin(actual), base)
     print(spec)
     assert _build_subclass(base, spec, actual) == exp
+
+
+def test_constrained_child():
+    cc = TypeAdapter(ConstrainedParent[Any]).validate_python({'type': 'ConstrainedChild', 'cc': '3.2', 'cd': '42'})
+    assert cc.cc == pytest.approx(3.2)
+
+def test_non_generic_child():
+    ngc = TypeAdapter(NonGenericParent).validate_python({'type': 'NonGenericChild', 'a': '42', 'b': '3.14'})
+    assert ngc.a == 42
+    assert ngc.b == pytest.approx(3.14)

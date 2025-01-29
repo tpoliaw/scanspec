@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from functools import lru_cache
 from inspect import isclass
 import warnings
-from types import UnionType
+from types import UnionType, get_original_bases
+import typing
 from typing import (
     Any,
     Generic,
@@ -162,29 +162,34 @@ def _get_origin(typ: type[Any]) -> type[Any]:
     # go around again, mainly to deal with Annotated not returning the origin of the wrapped type
     return _get_origin(origin)
 
+def _get_bases(typ: type) -> list[type]:
+    return getattr(typ, '__orig_bases__', ())
+
+def _get_parameters(typ: type) -> tuple[type,...]:
+    return getattr(typ, '__parameters__', None) or ()
+
 class InconsistentTypeWarning(RuntimeWarning): pass
 
 SpecEntry = int | type | TypeAlias | UnionType
 
 def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
     if root == sub:
-        return list(range(len(root.__parameters__)))
+        return list(range(len(_get_parameters(root))))
     elif not issubclass(sub, root):
         return None
-    sub_spec: list[None|SpecEntry] = [None for _ in root.__parameters__]
-    paras = sub.__parameters__
-    for base in sub.__orig_bases__:
-        spec = _subclass_spec(root, base.__origin__)
+    sub_spec: list[None|SpecEntry] = [None for _ in _get_parameters(root)]
+    paras = _get_parameters(sub)
+    for base in get_original_bases(sub):
+        spec = _subclass_spec(root, _get_origin(base))
         if spec is None: continue
-        b_args = base.__args__
+        b_args = typing.get_args(base) or []
         for i, p in enumerate(spec):
             if isinstance(p, type):
                 current = sub_spec[i]
                 if isinstance(current, type) and not issubclass(current, p):
                     warnings.warn(f'Type requires parameter to be both {sub_spec[i]} and {p}', InconsistentTypeWarning)
                 sub_spec[i] = p
-            else: # p is int
-            # elif isinstance(p, int):
+            elif isinstance(p, int):
                 req = b_args[p]
                 if isinstance(req, type):
                     sub_spec[i] = req
@@ -197,13 +202,14 @@ def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
 
 
 def _build_subclass(sub: type[Any], spec: list[int | type], actual: type[Any]) -> type[Any] | None:
-    paras = list(getattr(sub, '__parameters__', ()))
+    paras = list(_get_parameters(sub))
     base = get_args(actual)
     for i, s in enumerate(spec):
         if isinstance(s, int):
-            paras[s] = base[i]
+            if base[i] != Any:
+                paras[s] = base[i]
         else:
-            if not issubclass(base[i], s):
+            if base[i] != Any and not issubclass(base[i], s):
                 return None
     if paras:
         return sub.__class_getitem__(tuple(paras))
@@ -213,20 +219,18 @@ def _build_subclass(sub: type[Any], spec: list[int | type], actual: type[Any]) -
 class _TaggedUnion:
     def __init__(self, base_class: type[Any], discriminator: str):
         self._base_class = base_class
-        # If this class is generic, keep track of the parameters used
-        self._parameters = getattr(base_class, '__parameters__', [])
         # Classes and their field names that refer to this tagged union
         self._discriminator = discriminator
         # The members of the tagged union, i.e. subclasses of the baseclass
         self._subclasses: list[type] = []
         # Mapping of generic parameters of each subclass
-        self._subclass_spec: dict[type, list[int|type]] = {}
+        self._subclass_spec: dict[type, list[SpecEntry]] = {}
 
     def add_member(self, cls: type):
         if cls in self._subclasses:
             return
         self._subclasses.append(cls)
-        self._subclass_spec[cls] = _subclass_spec(self._base_class, cls)
+        self._subclass_spec[cls] = _subclass_spec(self._base_class, cls) or []
         for member in self._subclasses:
             if member is not cls:
                 _TaggedUnion._rebuild(member)
