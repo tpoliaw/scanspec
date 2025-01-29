@@ -155,39 +155,50 @@ def discriminated_union_of_subclasses(
 
 _tagged_unions: dict[type, _TaggedUnion] = {}
 
+
 def _get_origin(typ: type[Any]) -> type[Any]:
-    origin = getattr(typ, '__origin__', None)
+    origin = getattr(typ, "__origin__", None)
     if not origin:
         return typ
     # go around again, mainly to deal with Annotated not returning the origin of the wrapped type
     return _get_origin(origin)
 
+
 def _get_bases(typ: type) -> list[type]:
-    return getattr(typ, '__orig_bases__', ())
+    return getattr(typ, "__orig_bases__", ())
 
-def _get_parameters(typ: type) -> tuple[type,...]:
-    return getattr(typ, '__parameters__', None) or ()
 
-class InconsistentTypeWarning(RuntimeWarning): pass
+def _get_parameters(typ: type) -> tuple[type, ...]:
+    return getattr(typ, "__parameters__", None) or ()
+
+
+class InconsistentTypeWarning(RuntimeWarning):
+    pass
+
 
 SpecEntry = int | type | TypeAlias | UnionType
+
 
 def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
     if root == sub:
         return list(range(len(_get_parameters(root))))
     elif not issubclass(sub, root):
         return None
-    sub_spec: list[None|SpecEntry] = [None for _ in _get_parameters(root)]
+    sub_spec: list[None | SpecEntry] = [None for _ in _get_parameters(root)]
     paras = _get_parameters(sub)
     for base in get_original_bases(sub):
         spec = _subclass_spec(root, _get_origin(base))
-        if spec is None: continue
+        if spec is None:
+            continue
         b_args = typing.get_args(base) or []
         for i, p in enumerate(spec):
             if isinstance(p, type):
                 current = sub_spec[i]
                 if isinstance(current, type) and not issubclass(current, p):
-                    warnings.warn(f'Type requires parameter to be both {sub_spec[i]} and {p}', InconsistentTypeWarning)
+                    warnings.warn(
+                        f"Type requires parameter to be both {sub_spec[i]} and {p}",
+                        InconsistentTypeWarning,
+                    )
                 sub_spec[i] = p
             elif isinstance(p, int):
                 req = b_args[p]
@@ -201,7 +212,9 @@ def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
     return sub_spec
 
 
-def _build_subclass(sub: type[Any], spec: list[int | type], actual: type[Any]) -> type[Any] | None:
+def _build_subclass(
+    sub: type[Any], spec: list[int | type], actual: type[Any]
+) -> type[Any] | None:
     paras = list(_get_parameters(sub))
     base = get_args(actual)
     for i, s in enumerate(spec):
@@ -215,6 +228,7 @@ def _build_subclass(sub: type[Any], spec: list[int | type], actual: type[Any]) -
         return sub.__class_getitem__(tuple(paras))
     else:
         return sub
+
 
 class _TaggedUnion:
     def __init__(self, base_class: type[Any], discriminator: str):
@@ -245,7 +259,18 @@ class _TaggedUnion:
 
     def schema(self, actual_type: type[C], handler: GetCoreSchemaHandler) -> CoreSchema:
         return tagged_union_schema(
-                _make_schema((subschema for sub in self._subclasses if (subschema := _build_subclass(sub, self._subclass_spec[sub], actual_type))), handler),
+            _make_schema(
+                (
+                    subschema
+                    for sub in self._subclasses
+                    if (
+                        subschema := _build_subclass(
+                            sub, self._subclass_spec[sub], actual_type
+                        )
+                    )
+                ),
+                handler,
+            ),
             discriminator=self._discriminator,
             ref=self._base_class.__name__,
         )
@@ -406,9 +431,9 @@ class Frames(Generic[Axis]):
         {'x': array([1, 2, 3, 4, 5, 6]), 'y': array([6, 5, 4, 3, 2, 1])}
 
         """
-        assert set(self.axes()) == set(
-            other.axes()
-        ), f"axes {self.axes()} != {other.axes()}"
+        assert set(self.axes()) == set(other.axes()), (
+            f"axes {self.axes()} != {other.axes()}"
+        )
 
         def concat_dict(ds: Sequence[AxesPoints[Axis]]) -> AxesPoints[Axis]:
             # Concat each array in midpoints, lower, upper. E.g.
