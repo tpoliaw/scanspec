@@ -54,11 +54,11 @@ def test_child():
     assert ch.a == '42'
 
 def test_specific():
-    ch = TypeAdapter(Parent[int]).validate_python({'type': 'Specific', 'a': '42'})
-    assert ch.a == 42
+    ch = TypeAdapter(Parent[int]).validate_python({'type': 'Specific', 'b': '42'})
+    assert ch.b == 42
 
     with pytest.raises(Exception):
-        ch = TypeAdapter(Parent[str]).validate_python({'type': 'Specific', 'a': '42'})
+        ch = TypeAdapter(Parent[str]).validate_python({'type': 'Specific', 'b': '42'})
         print(ch)
 
 def test_extra_generic():
@@ -105,7 +105,7 @@ def test_subclass_spec(base: type[Any], origin: type[Any], spec: list[int|type[A
 @pytest.mark.parametrize('base,actual,exp', [
     (Child, Parent[int], Child[int]),
     (Child, Parent[str], Child[str]),
-    # (GrandChild, Parent[str], GrandChild[str]),
+    (GrandChild, Parent[str], GrandChild[str]),
     (Specific, Parent[int], Specific),
     (Specific, Parent[str], None),
     (DisorderedGeneric, Parent[int], DisorderedGeneric[T, int, V]),

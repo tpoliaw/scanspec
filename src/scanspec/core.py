@@ -6,12 +6,13 @@ import itertools
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import lru_cache
 from inspect import isclass
-import types
+import warnings
+from types import UnionType
 from typing import (
     Any,
     Generic,
-    Generator,
     Literal,
+    TypeAlias,
     TypeVar,
     get_args,
 )
@@ -161,31 +162,39 @@ def _get_origin(typ: type[Any]) -> type[Any]:
     # go around again, mainly to deal with Annotated not returning the origin of the wrapped type
     return _get_origin(origin)
 
-# def _recursive_bases(typ: type[Any]) -> Generator[type[Any]]:
-#     print(f'    recursing {typ}')
-#     for base in getattr(typ, '__orig_bases__', _get_origin(typ).__bases__):
-#         yield base
-#         yield from _recursive_bases(base)
+class InconsistentTypeWarning(RuntimeWarning): pass
 
-def _subclass_spec(base: type[Any], sub: type[Any]) -> list[int | type] | None:
-    print(f'{base=}, {sub=}')
-    base = _get_origin(base) # strip any annotations or aliases
-    if not getattr(base, '__parameters__', None): # base class is not generic
-        return []
-    for bs in types.get_original_bases(sub):
-        if issubclass(_get_origin(bs), base):
-            pass
-        if _get_origin(bs) == base:
-            break
-        else:
-            spec =
-    else:
-        raise ValueError("sub is not subclass of base")
-    args = getattr(sub, '__parameters__', ())
-    base_args = get_args(bs)
-    if not args: # subclass is not generic
-        return list(base_args)
-    return [b if isinstance(b, type) else args.index(b) for b in base_args]
+SpecEntry = int | type | TypeAlias | UnionType
+
+def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
+    if root == sub:
+        return list(range(len(root.__parameters__)))
+    elif not issubclass(sub, root):
+        return None
+    sub_spec: list[None|SpecEntry] = [None for _ in root.__parameters__]
+    paras = sub.__parameters__
+    for base in sub.__orig_bases__:
+        spec = _subclass_spec(root, base.__origin__)
+        if spec is None: continue
+        b_args = base.__args__
+        for i, p in enumerate(spec):
+            if isinstance(p, type):
+                current = sub_spec[i]
+                if isinstance(current, type) and not issubclass(current, p):
+                    warnings.warn(f'Type requires parameter to be both {sub_spec[i]} and {p}', InconsistentTypeWarning)
+                sub_spec[i] = p
+            else: # p is int
+            # elif isinstance(p, int):
+                req = b_args[p]
+                if isinstance(req, type):
+                    sub_spec[i] = req
+                elif isinstance(req, UnionType):
+                    warnings.warn("what are unions?")
+                    sub_spec[i] = req
+                else:
+                    sub_spec[i] = paras.index(req)
+    return sub_spec
+
 
 def _build_subclass(sub: type[Any], spec: list[int | type], actual: type[Any]) -> type[Any] | None:
     paras = list(getattr(sub, '__parameters__', ()))
@@ -217,7 +226,7 @@ class _TaggedUnion:
         if cls in self._subclasses:
             return
         self._subclasses.append(cls)
-        # self._subclass_spec[cls] = _subclass_spec(self._base_class, cls)
+        self._subclass_spec[cls] = _subclass_spec(self._base_class, cls)
         for member in self._subclasses:
             if member is not cls:
                 _TaggedUnion._rebuild(member)
@@ -232,47 +241,10 @@ class _TaggedUnion:
 
     def schema(self, actual_type: type[C], handler: GetCoreSchemaHandler) -> CoreSchema:
         return tagged_union_schema(
-               _make_schema(self._subclasses, handler),
-                # _make_schema((subschema for sub in self._subclasses if (subschema := _build_subclass(sub, self._subclass_spec[sub], actual_type))), handler),
+                _make_schema((subschema for sub in self._subclasses if (subschema := _build_subclass(sub, self._subclass_spec[sub], actual_type))), handler),
             discriminator=self._discriminator,
             ref=self._base_class.__name__,
         )
-
-    def _union_member(self, actual_type: type[C], sub_class: type[S]) -> type[S] | None:
-        # Multiple sitations we could be in
-        # Base class is not generic:
-        # -> child class is not generic
-        #    -> no generics involved so return as is
-        # -> child class is generic
-        #    -> generics are all childs, return Any for all TODO: defaults/bounds?
-        # Base class is generic
-        # -> child is not generic
-        #    -> child subclass of specific type
-        #       return only if types match actual type
-        # -> child is generic
-        #    -> base generics filled, eg Child(Base[int], Generic[T]):
-        #       return Any (defaults/bounds) if specific type match actual type
-        #    -> base generics passed only, eg Child(Base[T])
-        #       return Child with types from actual type
-        #    -> base generics and new generics, eg Child(Base[T], Generic[T, U]):
-        #       replace generics with args from actual type and fill in Any for rest
-        #
-        # If base class is generic but actual type has no args, treat as Any?
-        parent_paras = getattr(actual_type, '__parameters__', [])
-        sub_paras = getattr(sub_class, '__parameters__', [])
-        sub_parent = sub_class.__orig_bases__
-        for i, base in enumerate(sub_class.__orig_bases__):
-            if base.__origin__ == self._base_class:
-                break
-        else:
-            return sub_class
-            raise ValueError("Base class is not base of subclass")
-        print(f'{actual_type.__args__=}')
-        print(f'{sub_class.__parameters__=}')
-        print(f'{sub_class=}')
-        print(f'{base=}')
-        print()
-        return sub_class
 
 
 # @lru_cache(1)
