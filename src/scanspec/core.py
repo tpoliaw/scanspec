@@ -172,43 +172,60 @@ class InconsistentTypeWarning(RuntimeWarning):
     pass
 
 
-SpecEntry = int | type | UnionType | GenericAlias | NewType
+SpecEntry = int | type | GenericAlias | NewType | set['SpecEntry']
 
 
 def _subclass_spec(root: type[Any], sub: type[Any]) -> list[SpecEntry] | None:
     if root == sub:
+        # if this is the root type, the parameters all map 1-to-1
         return list(range(len(_get_parameters(root))))
     elif not issubclass(sub, root):
+        # if this is not a subclass there is no mapping to return
         return None
+
     sub_spec: list[None | SpecEntry] = [None for _ in _get_parameters(root)]
-    paras = _get_parameters(sub)
+    sub_parameters = _get_parameters(sub)
     for base in get_original_bases(sub):
-        spec = _subclass_spec(root, _get_origin(base))
-        if spec is None:
+        base_spec = _subclass_spec(root, _get_origin(base))
+        if base_spec is None:
             continue
-        b_args = typing.get_args(base) or []
-        required_args = len([i for i in spec if isinstance(i, int)])
-        if len(b_args) < required_args:
+        base_args = typing.get_args(base) or []
+
+        if len(base_args) < (required_args := len([i for i in base_spec if isinstance(i, int)])):
+            # this should be caught by type checkers but bail out if one has got this far
             warnings.warn(
-                f"Type {sub} does not have enough type parameters, expected {required_args}, found {len(b_args)}",
+                f"Type {sub} does not have enough type parameters, expected {required_args}, found {len(base_args)}",
                 InconsistentTypeWarning,
             )
             return None
-        for i, p in enumerate(spec):
-            if isinstance(p, type):
+        for i, arg_bound in enumerate(base_spec):
+            if isinstance(arg_bound, (type, GenericAlias, NewType)):
                 current = sub_spec[i]
-                if isinstance(current, type) and not issubclass(current, p):
+                if isinstance(current, type) and not issubclass(current, arg_bound):
                     warnings.warn(
-                        f"Type requires parameter to be both {sub_spec[i]} and {p}",
+                        f"Type requires parameter to be both {sub_spec[i]} and {arg_bound}",
                         InconsistentTypeWarning,
                     )
-                sub_spec[i] = p
-            elif isinstance(p, int):
-                req = b_args[p]
+                elif isinstance(current, set) and not arg_bound in current:
+                    warnings.warn(
+                        f'Type requires parameter to be both one of {current} and {arg_bound}',
+                        InconsistentTypeWarning
+                    )
+                sub_spec[i] = arg_bound
+            elif isinstance(arg_bound, int):
+                req = base_args[arg_bound]
+                print(f'{req=}')
                 if isinstance(req, TypeVar):
-                    sub_spec[i] = paras.index(req)
+                    sub_spec[i] = sub_parameters.index(req)
+                elif isinstance(req, (UnionType, typing._UnionGenericAlias)):
+                    bound = {sub_parameters.index(arg) if isinstance(arg, TypeVar) else arg for arg in req.__args__}
+                    print(f'Bound to union type: {req}')
+                    sub_spec[i] = bound
                 else:
                     sub_spec[i] = req
+            else: #if isinstance(p, set):
+                print(f'Spec is union: {arg_bound}')
+                pass
 
     if None in sub_spec:
         # pretty sure this isn't possible
@@ -232,11 +249,11 @@ def _build_subclass(
 
             # if intersection(base[i], s).is_empty():
             #     return None
-            if isinstance(s, UnionType):
+            if isinstance(s, set):
                 # TODO: this should check the intersection of types in base[i] and s
                 pass
             elif isinstance(s, type):
-                if base[i] != Any and not issubclass(base[i], s):
+                if base[i] != Any and not issubclass(_get_origin(base[i]), s):
                     return None
             else:
                 # compare allowed types in alias and in base[i]

@@ -61,7 +61,7 @@ class DisorderedGeneric(Parent[U], Generic[T, U, V]):
     i: V
 
 @dataclass
-class AmbiguousChild(Parent[int | U], Generic[U]):
+class Ambiguous(Parent[int | U], Generic[U]):
     a: U
 
 
@@ -105,6 +105,9 @@ def test_child():
 
     ch = deserialize(Parent[str], {"type": "Child", "a": "42"})
     assert ch.a == "42"
+
+    ch = deserialize(Parent[list[int]], {'type': 'Child', 'a': ['1', '2', '3']})
+    assert ch.a == [1, 2, 3]
 
 
 def test_specific():
@@ -155,10 +158,10 @@ def test_unmarked_child():
     ch = deserialize(Parent[int], {"type": "UnmarkedChild", "a": "23"})
     assert ch.a == 23
 
-def test_ambiguous_child():
+def test_ambiguous():
     # this test is ambiguous as both 42 and '42' would be valid but record the
     # one that works here so at least we know it stays consistent
-    spec ={'type': 'AmbiguousChild', 'a': '42'}
+    spec ={'type': 'Ambiguous', 'a': '42'}
     ch = deserialize(Parent[int], spec)
     assert ch.a == '42'
 
@@ -192,7 +195,7 @@ def test_get_origin(typ: type[Any], origin: type[Any]):
         (Parent, ExtraGeneric, [0]),
         (Parent, UnrelatedGeneric, [int]),
         (Parent, DisorderedGeneric, [1]),
-        (Parent, AmbiguousChild, [(int, 0)])
+        (Parent, Ambiguous, [{int, 0}])
     ],
 )
 def test_subclass_spec(base: type[Any], origin: type[Any], spec: list[int | type[Any]]):
@@ -220,10 +223,18 @@ def test_build_subclass(base: type[Any], actual: type[Any], exp: type[Any]):
 
 
 def test_constrained_child():
+    a = ConstrainedChild(cc = 23)
+    print(a)
+
     cc = deserialize(ConstrainedParent[Any],
         {"type": "ConstrainedChild", "cc": "3.2", "cd": "42"}
     )
     assert cc.cc == pytest.approx(3.2)
+
+    import pydantic
+    with pytest.raises(pydantic.ValidationError):
+        cc = deserialize(ConstrainedParent[str], {'type': 'ConstrainedChild', 'cc': '3.2', 'cd': '42'})
+        print(cc)
 
 
 def test_non_generic_child():
